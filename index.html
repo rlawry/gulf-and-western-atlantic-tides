@@ -91,6 +91,21 @@
         #infoPanel a {
             color: #8ab4f8;
         }
+        #namesToggle, #densityToggle {
+            position: absolute;
+            right: 10px;
+            color: rgba(255,255,255,0.75);
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            z-index: 15;
+            cursor: pointer;
+            user-select: none;
+        }
+        #namesToggle { top: 50px; }
+        #densityToggle { top: 72px; }
+        #namesToggle label, #densityToggle label {
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -105,6 +120,12 @@
         <button id="animateBtn">Animate</button>
     </div>
     <button id="infoBtn">Citations / Info</button>
+    <div id="namesToggle">
+        <label><input type="checkbox" id="showNamesChk" checked> gauge names</label>
+    </div>
+    <div id="densityToggle">
+        <label><input type="checkbox" id="reduceDensityChk"> reduce density</label>
+    </div>
     <div id="infoPanel">
         <h2>Data &amp; Movement Info</h2>
         <p><strong>NOAA tide predictions</strong> are provided by the National Oceanic and Atmospheric Administration</p>
@@ -124,6 +145,10 @@
         const ctx = canvas.getContext('2d');
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
+
+        let showNames = true;
+        let reduceDensity = false;
+        let thinnedData = [];
 
         let data = [];
         let moonData = [];
@@ -181,10 +206,19 @@
                 station.minV = minV;
             });
 
+            // Build thinned dataset: greedy 0.5° minimum longitude spacing
+            const sorted = data.slice().sort((a, b) => a.lon360 - b.lon360);
+            let lastLon = -999;
+            thinnedData = sorted.filter(st => {
+                if (st.lon360 - lastLon >= 0.5) { lastLon = st.lon360; return true; }
+                return false;
+            });
+
             // Load moon data
             moonData = moonJson.map(m => ({
                 time: new Date(m.time + ' UTC').getTime(),
                 longitude: m.sublunar_longitude,
+                sunLon: m.subsolar_longitude,
                 phase: m.phase,
                 waxing: m.waxing
             }));
@@ -231,6 +265,16 @@
             }
         });
 
+        document.getElementById('showNamesChk').addEventListener('change', e => {
+            showNames = e.target.checked;
+            draw();
+        });
+
+        document.getElementById('reduceDensityChk').addEventListener('change', e => {
+            reduceDensity = e.target.checked;
+            draw();
+        });
+
         document.getElementById('infoBtn').addEventListener('click', () => {
             const panel = document.getElementById('infoPanel');
             panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -254,15 +298,25 @@
             for (let i = 0; i < moonData.length - 1; i++) {
                 if (time >= moonData[i].time && time <= moonData[i + 1].time) {
                     const t = (time - moonData[i].time) / (moonData[i + 1].time - moonData[i].time);
-                    let lon0 = moonData[i].longitude;
-                    let lon1 = moonData[i + 1].longitude;
-                    // Handle 0°/360° wrap-around
+
+                    let lon0 = moonData[i].longitude, lon1 = moonData[i + 1].longitude;
                     let lonDiff = lon1 - lon0;
                     if (lonDiff > 180) lonDiff -= 360;
                     if (lonDiff < -180) lonDiff += 360;
                     const interpolatedLon = ((lon0 + t * lonDiff) + 360) % 360;
+
+                    let slon0 = moonData[i].sunLon, slon1 = moonData[i + 1].sunLon;
+                    let interpolatedSunLon = null;
+                    if (slon0 != null && slon1 != null) {
+                        let slonDiff = slon1 - slon0;
+                        if (slonDiff > 180) slonDiff -= 360;
+                        if (slonDiff < -180) slonDiff += 360;
+                        interpolatedSunLon = ((slon0 + t * slonDiff) + 360) % 360;
+                    }
+
                     return {
                         longitude: interpolatedLon,
+                        sunLon: interpolatedSunLon,
                         phase: moonData[i].phase + t * (moonData[i + 1].phase - moonData[i].phase),
                         waxing: moonData[i].waxing
                     };
@@ -309,11 +363,10 @@
             ctx.restore();
         }
 
-        function drawEquilibriumTide(currentTime) {
-            const utcHours = (currentTime % 86400000) / 3600000;
-            const sunLon = ((180 - utcHours * 15) % 360 + 360) % 360;
-            const moon = moonData.length > 0 ? interpolateMoon(currentTime) : null;
-            const moonLon = moon ? moon.longitude : sunLon;
+        function drawEquilibriumTide(currentTime, bodies) {
+            const moonLon = bodies ? bodies.longitude : 0;
+            const sunLon  = (bodies && bodies.sunLon != null) ? bodies.sunLon
+                          : ((180 - (currentTime % 86400000) / 3600000 * 15) % 360 + 360) % 360;
 
             const centerY = canvas.height * 0.5;
             const A_moon = canvas.height * 0.1;
@@ -400,11 +453,12 @@
             }
 
             const currentTime = minTime + currentTimeOffset;
-            drawEquilibriumTide(currentTime);
+            const bodies = moonData.length > 0 ? interpolateMoon(currentTime) : null;
+            drawEquilibriumTide(currentTime, bodies);
 
             ctx.font = '11px "Courier New"';
             ctx.textAlign = 'left';
-            data.forEach(station => {
+            (reduceDensity ? thinnedData : data).forEach(station => {
                 const v = interpolateV(station.predictions, currentTime);
                 const y = canvas.height - station.offsetY - ((v - station.minV) * station.scaleY);
 
@@ -413,19 +467,20 @@
                 ctx.arc(station.x, y, 2, 0, Math.PI * 2);
                 ctx.fill();
 
-                const textWidth = ctx.measureText(station.name).width;
-                let labelX = station.x + 6;
-                if (labelX + textWidth > canvas.width - 4) {
-                    labelX = canvas.width - 4 - textWidth;
+                if (showNames) {
+                    const textWidth = ctx.measureText(station.name).width;
+                    let labelX = station.x + 6;
+                    if (labelX + textWidth > canvas.width - 4) {
+                        labelX = canvas.width - 4 - textWidth;
+                    }
+                    ctx.textBaseline = 'bottom';
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+                    ctx.fillText(station.name, labelX, y - 4);
+                    ctx.textBaseline = 'alphabetic';
                 }
-                ctx.textBaseline = 'bottom';
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
-                ctx.fillText(station.name, labelX, y - 4);
-                ctx.textBaseline = 'alphabetic';
             });
-            // Draw sun (simple UTC-based sub-solar longitude)
-            const utcHours = (currentTime % 86400000) / 3600000;
-            const sunLon = ((180 - utcHours * 15) % 360 + 360) % 360;
+            // Draw sun using Skyfield-derived sub-solar longitude
+            const sunLon = bodies ? bodies.sunLon : ((180 - (currentTime % 86400000) / 3600000 * 15) % 360 + 360) % 360;
             if (sunLon >= minLon360 && sunLon <= maxLon360) {
                 const sunX = ((sunLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
                 const sunY = canvas.height / 4;
@@ -441,14 +496,13 @@
             }
 
             // Draw moon
-            if (moonData.length > 0) {
-                const moon = interpolateMoon(currentTime);
-                const moonLon = moon.longitude;
+            if (bodies) {
+                const moonLon = bodies.longitude;
                 if (moonLon >= minLon360 && moonLon <= maxLon360) {
                     const moonX = ((moonLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
                     const moonY = canvas.height / 3;
                     const r = 15;
-                    drawMoonPhase(moonX, moonY, r, moon.phase, moon.waxing);
+                    drawMoonPhase(moonX, moonY, r, bodies.phase, bodies.waxing);
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
                     ctx.font = '11px "Courier New"';
                     ctx.textAlign = 'center';

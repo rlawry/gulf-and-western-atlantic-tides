@@ -50,9 +50,17 @@ for time_str in times:
     diff = (moon_ecl_lon.degrees - sun_ecl_lon.degrees) % 360
     waxing = bool(diff < 180)
 
+    # Sub-solar longitude: same method as sub-lunar (RA - GAST) * 15
+    sun_ra, _, _ = sun_obs.radec()
+    sublon_sun_hours = sun_ra.hours - t.gast
+    sublon_sun_deg = (sublon_sun_hours * 15.0) % 360.0
+    if sublon_sun_deg < 0:
+        sublon_sun_deg += 360.0
+
     moon_positions.append({
         'time': time_str,
         'sublunar_longitude': sublon_deg,
+        'subsolar_longitude': sublon_sun_deg,
         'phase': illuminated,
         'waxing': waxing
     })
