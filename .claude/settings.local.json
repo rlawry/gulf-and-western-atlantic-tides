@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import json; d=json.load\\(open\\('tides.json'\\)\\); print\\([\\(s['name'], s['longitude']\\) for s in d]\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python moon_positions.py)"
+    ]
+  }
+}

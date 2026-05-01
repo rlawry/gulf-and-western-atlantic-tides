@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tide Gages Animation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: 'Courier New', monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-family: 'Courier New', monospace;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        #animateBtn {
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            padding: 4px 16px;
+            cursor: pointer;
+        }
+        #timeDisplay {
+            font-size: 18px;
+            letter-spacing: 0.05em;
+        }
+        #speed-label {
+            font-size: 13px;
+        }
+        #slider-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        #speedSlider {
+            width: 180px;
+        }
+        #infoBtn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            padding: 4px 16px;
+            cursor: pointer;
+            color: white;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        #infoPanel {
+            position: absolute;
+            top: 50px;
+            right: 10px;
+            width: 320px;
+            max-height: calc(100vh - 70px);
+            overflow-y: auto;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.92);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #eee;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.45;
+            display: none;
+            z-index: 10;
+        }
+        #infoPanel h2 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            letter-spacing: 0.08em;
+        }
+        #infoPanel p,
+        #infoPanel li {
+            margin: 0 0 8px 0;
+        }
+        #infoPanel a {
+            color: #8ab4f8;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div id="timeDisplay"></div>
+        <div id="speed-label">Animation Speed: <span id="speedValue">50x</span></div>
+        <div id="slider-row">
+            <span>50x</span>
+            <input type="range" id="speedSlider" min="50" max="800" value="50">
+            <span>800x</span>
+        </div>
+        <button id="animateBtn">Animate</button>
+    </div>
+    <button id="infoBtn">Citations / Info</button>
+    <div id="infoPanel">
+        <h2>Data &amp; Movement Info</h2>
+        <p><strong>NOAA tide predictions</strong> are provided by the National Oceanic and Atmospheric Administration</p>
+        <ul>
+            <li><a href="https://tidesandcurrents.noaa.gov/" target="_blank" rel="noreferrer">NOAA Tides &amp; Currents</a></li>
+            <li><a href="https://tidesandcurrents.noaa.gov/api/" target="_blank" rel="noreferrer">NOAA API documentation</a></li>
+        </ul>
+        <p><strong>Equilibrium tide</strong> refers to the idealized tidal response from the Moon and Sun on a perfectly uniform ocean surface.</p>
+        <p><strong>MLLW</strong> means Mean Lower Low Water: the long-term average height of the lowest tide recorded each day. Tide values here are relative to that baseline.</p>
+        <p>The animation shows tide-gauge locations horizontally by longitude. Each dot moves vertically according to predicted tide height at that site.</p>
+        <p>The Moon’s marker is plotted using its sublunar longitude, which is the longitude directly beneath the Moon as Earth rotates.</p>
+        <p>If the Moon’s longitude lies outside the visible gage range, it is hidden until it reappears within the current span.</p>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let data = [];
+        let moonData = [];
+        let minLon360 = Infinity, maxLon360 = -Infinity;
+        let minTime = Infinity, maxTime = -Infinity;
+        let minV = Infinity, maxV = -Infinity;
+        let scaleY = 1, offsetY = 0;
+        let animationId = null;
+        let isAnimating = false;
+        let startTime = null;
+        const baseDuration = 24 * 60 * 60 * 1000; // 24 hours in ms for 1x speed
+        let currentTimeOffset = 0;
+
+        Promise.all([
+            fetch('tides.json').then(response => response.json()),
+            fetch('moon.json').then(response => response.json())
+        ])
+        .then(([tidesJson, moonJson]) => {
+            data = tidesJson.map(station => {
+                const preds = station.predictions.map(p => ({
+                    time: new Date(p.t + ' UTC').getTime(),
+                    v: parseFloat(p.v)
+                }));
+                preds.sort((a, b) => a.time - b.time);
+                const lon = parseFloat(station.longitude);
+                const lon360 = lon < 0 ? lon + 360 : lon;
+                minLon360 = Math.min(minLon360, lon360);
+                maxLon360 = Math.max(maxLon360, lon360);
+                return {
+                    name: station.name,
+                    lon: lon,
+                    lon360: lon360,
+                    lat: parseFloat(station.latitude),
+                    predictions: preds
+                };
+            });
+
+            data.forEach(station => {
+                station.predictions.forEach(p => {
+                    minTime = Math.min(minTime, p.time);
+                    maxTime = Math.max(maxTime, p.time);
+                    minV = Math.min(minV, p.v);
+                    maxV = Math.max(maxV, p.v);
+                });
+            });
+
+            const vRange = maxV - minV;
+            scaleY = (canvas.height * 0.8) / vRange;
+            offsetY = canvas.height * 0.1;
+
+            data.forEach(station => {
+                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                station.scaleY = scaleY;
+                station.offsetY = offsetY;
+                station.minV = minV;
+            });
+
+            // Load moon data
+            moonData = moonJson.map(m => ({
+                time: new Date(m.time + ' UTC').getTime(),
+                longitude: m.sublunar_longitude,
+                phase: m.phase,
+                waxing: m.waxing
+            }));
+
+            draw();
+            const initDate = new Date(minTime);
+            document.getElementById('timeDisplay').textContent = initDate.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+        });
+
+
+        document.getElementById('animateBtn').addEventListener('click', () => {
+            if (isAnimating) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+                isAnimating = false;
+                document.getElementById('animateBtn').textContent = 'Animate';
+            } else {
+                isAnimating = true;
+                const speed = parseInt(speedSlider.value);
+                startTime = performance.now() - (currentTimeOffset * baseDuration) / ((maxTime - minTime) * speed);
+                document.getElementById('animateBtn').textContent = 'Pause';
+                animationId = requestAnimationFrame(animate);
+            }
+        });
+
+        const speedSlider = document.getElementById('speedSlider');
+        const speedLabel = document.getElementById('speedValue');
+
+        speedSlider.addEventListener('input', () => {
+            speedLabel.textContent = speedSlider.value + 'x';
+            if (isAnimating && animationId !== null) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+        });
+
+        speedSlider.addEventListener('change', () => {
+            if (isAnimating) {
+                const newSpeed = parseInt(speedSlider.value);
+                if ((maxTime - minTime) > 0) {
+                    startTime = performance.now() - (currentTimeOffset * baseDuration) / ((maxTime - minTime) * newSpeed);
+                }
+                animationId = requestAnimationFrame(animate);
+            }
+        });
+
+        document.getElementById('infoBtn').addEventListener('click', () => {
+            const panel = document.getElementById('infoPanel');
+            panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+        });
+
+        function interpolateV(predictions, time) {
+            if (time <= predictions[0].time) return predictions[0].v;
+            if (time >= predictions[predictions.length - 1].time) return predictions[predictions.length - 1].v;
+            for (let i = 0; i < predictions.length - 1; i++) {
+                if (time >= predictions[i].time && time <= predictions[i + 1].time) {
+                    const t = (time - predictions[i].time) / (predictions[i + 1].time - predictions[i].time);
+                    return predictions[i].v + t * (predictions[i + 1].v - predictions[i].v);
+                }
+            }
+            return 0;
+        }
+
+        function interpolateMoon(time) {
+            if (time <= moonData[0].time) return moonData[0];
+            if (time >= moonData[moonData.length - 1].time) return moonData[moonData.length - 1];
+            for (let i = 0; i < moonData.length - 1; i++) {
+                if (time >= moonData[i].time && time <= moonData[i + 1].time) {
+                    const t = (time - moonData[i].time) / (moonData[i + 1].time - moonData[i].time);
+                    let lon0 = moonData[i].longitude;
+                    let lon1 = moonData[i + 1].longitude;
+                    // Handle 0°/360° wrap-around
+                    let lonDiff = lon1 - lon0;
+                    if (lonDiff > 180) lonDiff -= 360;
+                    if (lonDiff < -180) lonDiff += 360;
+                    const interpolatedLon = ((lon0 + t * lonDiff) + 360) % 360;
+                    return {
+                        longitude: interpolatedLon,
+                        phase: moonData[i].phase + t * (moonData[i + 1].phase - moonData[i].phase),
+                        waxing: moonData[i].waxing
+                    };
+                }
+            }
+            return moonData[0];
+        }
+
+        function drawMoonPhase(cx, cy, r, phase, waxing) {
+            ctx.save();
+
+            // Clip all drawing to the moon disk
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+            ctx.clip();
+
+            // Step 1: full white disk
+            ctx.fillStyle = 'white';
+            ctx.fillRect(cx - r, cy - r, 2 * r, 2 * r);
+
+            // Step 2: fill the unlit half with black
+            // waxing → left half is dark; waning → right half is dark
+            ctx.fillStyle = 'black';
+            if (waxing) {
+                ctx.fillRect(cx - r, cy - r, r, 2 * r);
+            } else {
+                ctx.fillRect(cx,     cy - r, r, 2 * r);
+            }
+
+            // Step 3: terminator ellipse
+            // x semi-axis goes from r (new) → 0 (quarter) → r (full)
+            const ex = Math.abs(1 - 2 * phase) * r;
+            if (phase < 0.5) {
+                // Crescent: dark ellipse eats into the lit half
+                ctx.fillStyle = 'black';
+            } else {
+                // Gibbous: white ellipse carves lit area back out of the dark half
+                ctx.fillStyle = 'white';
+            }
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, ex, r, 0, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function drawEquilibriumTide(currentTime) {
+            const utcHours = (currentTime % 86400000) / 3600000;
+            const sunLon = ((180 - utcHours * 15) % 360 + 360) % 360;
+            const moon = moonData.length > 0 ? interpolateMoon(currentTime) : null;
+            const moonLon = moon ? moon.longitude : sunLon;
+
+            const centerY = canvas.height * 0.5;
+            const A_moon = canvas.height * 0.1;
+            const A_sun = 0.46 * A_moon;
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(120, 255, 180, 0.65)';
+            ctx.lineWidth = 2;
+
+            for (let px = 0; px < canvas.width; px++) {
+                const lon = minLon360 + (px - 10) * (maxLon360 - minLon360) / (canvas.width - 20);
+                const h = A_moon * Math.cos(2 * (lon - moonLon) * Math.PI / 180)
+                        + A_sun  * Math.cos(2 * (lon - sunLon)  * Math.PI / 180);
+                const y = centerY - h;
+                if (px === 0) ctx.moveTo(px, y);
+                else ctx.lineTo(px, y);
+            }
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(120, 255, 180, 0.85)';
+            ctx.font = '11px "Courier New"';
+            const labelX = 10;
+            const lon0 = minLon360;
+            const lon1 = minLon360 + (maxLon360 - minLon360) * 4 / Math.max(canvas.width - 20, 1);
+            const y0 = centerY - (A_moon * Math.cos(2 * (lon0 - moonLon) * Math.PI / 180)
+                        + A_sun  * Math.cos(2 * (lon0 - sunLon)  * Math.PI / 180));
+            const y1 = centerY - (A_moon * Math.cos(2 * (lon1 - moonLon) * Math.PI / 180)
+                        + A_sun  * Math.cos(2 * (lon1 - sunLon)  * Math.PI / 180));
+            const dy = y1 - y0;
+            const dx = Math.max(1, (lon1 - lon0) / (maxLon360 - minLon360) * (canvas.width - 20));
+            const angle = Math.atan2(dy, dx);
+            ctx.save();
+            ctx.translate(labelX, y0 - 4);
+            ctx.rotate(angle);
+            ctx.textAlign = 'left';
+            ctx.fillText('equilibrium tide', 0, 0);
+            ctx.restore();
+            ctx.restore();
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Horizontal tide-height grid (1 ft intervals, MLLW datum)
+            const firstTick = Math.ceil(minV);
+            ctx.textAlign = 'left';
+            ctx.font = '11px "Courier New"';
+            for (let v = firstTick; v <= maxV; v++) {
+                const y = canvas.height - offsetY - (v - minV) * scaleY;
+                if (v === 0) {
+                    ctx.strokeStyle = 'rgba(100, 200, 255, 0.85)';
+                    ctx.lineWidth = 1.5;
+                    ctx.fillStyle = 'rgba(100, 200, 255, 0.95)';
+                    ctx.fillText('0 ft  (MLLW)', 5, y - 4);
+                } else {
+                    ctx.strokeStyle = 'rgba(100, 180, 255, 0.2)';
+                    ctx.lineWidth = 1;
+                    ctx.fillStyle = 'rgba(100, 180, 255, 0.5)';
+                    ctx.fillText(v + ' ft', 5, y - 4);
+                }
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+
+            // Longitude grid lines every 5°
+            const gridInterval = 5;
+            const firstGrid = Math.ceil(minLon360 / gridInterval) * gridInterval;
+            ctx.strokeStyle = 'rgba(100, 180, 255, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.fillStyle = 'rgba(100, 180, 255, 0.7)';
+            ctx.font = '12px "Courier New"';
+            ctx.textAlign = 'center';
+            for (let lon = firstGrid; lon <= maxLon360; lon += gridInterval) {
+                const x = ((lon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+                const label = (lon > 180 ? lon - 360 : lon).toFixed(0) + '°';
+                ctx.fillText(label, x, canvas.height - 8);
+            }
+
+            const currentTime = minTime + currentTimeOffset;
+            drawEquilibriumTide(currentTime);
+
+            ctx.font = '11px "Courier New"';
+            ctx.textAlign = 'left';
+            data.forEach(station => {
+                const v = interpolateV(station.predictions, currentTime);
+                const y = canvas.height - station.offsetY - ((v - station.minV) * station.scaleY);
+
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(station.x, y, 2, 0, Math.PI * 2);
+                ctx.fill();
+
+                const textWidth = ctx.measureText(station.name).width;
+                let labelX = station.x + 6;
+                if (labelX + textWidth > canvas.width - 4) {
+                    labelX = canvas.width - 4 - textWidth;
+                }
+                ctx.textBaseline = 'bottom';
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+                ctx.fillText(station.name, labelX, y - 4);
+                ctx.textBaseline = 'alphabetic';
+            });
+            // Draw sun (simple UTC-based sub-solar longitude)
+            const utcHours = (currentTime % 86400000) / 3600000;
+            const sunLon = ((180 - utcHours * 15) % 360 + 360) % 360;
+            if (sunLon >= minLon360 && sunLon <= maxLon360) {
+                const sunX = ((sunLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                const sunY = canvas.height / 4;
+                const sr = 15;
+                ctx.fillStyle = '#FFD700';
+                ctx.beginPath();
+                ctx.arc(sunX, sunY, sr, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.85)';
+                ctx.font = '11px "Courier New"';
+                ctx.textAlign = 'center';
+                ctx.fillText('sun', sunX, sunY + sr + 13);
+            }
+
+            // Draw moon
+            if (moonData.length > 0) {
+                const moon = interpolateMoon(currentTime);
+                const moonLon = moon.longitude;
+                if (moonLon >= minLon360 && moonLon <= maxLon360) {
+                    const moonX = ((moonLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                    const moonY = canvas.height / 3;
+                    const r = 15;
+                    drawMoonPhase(moonX, moonY, r, moon.phase, moon.waxing);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+                    ctx.font = '11px "Courier New"';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('moon', moonX, moonY + r + 13);
+                }
+            }
+        }
+
+        function animate(timestamp) {
+            if (!startTime) startTime = timestamp;
+            const elapsed = timestamp - startTime;
+            const speed = parseInt(document.getElementById('speedSlider').value);
+            currentTimeOffset = (elapsed * (maxTime - minTime)) / baseDuration * speed;
+            if (currentTimeOffset > maxTime - minTime) {
+                currentTimeOffset = 0;
+                startTime = timestamp;
+            }
+            const currentTime = minTime + currentTimeOffset;
+            const date = new Date(currentTime);
+            document.getElementById('timeDisplay').textContent = date.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+            draw();
+            if (isAnimating) {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            data.forEach(station => {
+                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+            });
+            draw();
+        });
+    </script>
+</body>
+</html>
