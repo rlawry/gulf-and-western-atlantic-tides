@@ -729,6 +729,28 @@
             ctx.restore();
         }
 
+        function drawRegionLabels() {
+            // lon360 zone boundaries (lon + 360 for negative longitudes)
+            const regions = [
+                { label: 'Gulf',       lo: 260, hi: 277 },
+                { label: 'Florida',    lo: 277, hi: 280 },
+                { label: 'East Coast', lo: 280, hi: 296 },
+            ];
+            const toX = lon => ((lon - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
+            ctx.save();
+            ctx.font = '11px "Courier New"';
+            ctx.fillStyle = '#FFD700';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            regions.forEach(({ label, lo, hi }) => {
+                const clo = Math.max(lo, minLon360);
+                const chi = Math.min(hi, maxLon360);
+                if (clo >= chi) return;
+                ctx.fillText(label, (toX(clo) + toX(chi)) / 2, logH - 20);
+            });
+            ctx.restore();
+        }
+
         function draw() {
             const currentTime = minTime + currentTimeOffset;
             const bodies = moonData.length > 0 ? interpolateMoon(currentTime) : null;
@@ -777,6 +799,7 @@
                 ctx.fillText(label, x, logH - 8);
             }
 
+            drawRegionLabels();
             drawEquilibriumTide(currentTime, bodies);
             if (showSpline) drawSpline(currentTime);
             drawMoonIndicator(currentTime);
