@@ -50,10 +50,22 @@
         #speedSlider {
             width: 180px;
         }
-        #infoBtn {
+        #topRight {
             position: absolute;
             top: 10px;
             right: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #moonIndicator {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.25);
+            flex-shrink: 0;
+        }
+        #infoBtn {
             font-family: 'Courier New', monospace;
             font-size: 14px;
             padding: 4px 16px;
@@ -91,9 +103,10 @@
         #infoPanel a {
             color: #8ab4f8;
         }
-        #namesToggle, #densityToggle {
+        #namesToggle, #densityToggle, #splineToggle {
             position: absolute;
             right: 10px;
+            min-width: 10.5em;
             color: rgba(255,255,255,0.75);
             font-family: 'Courier New', monospace;
             font-size: 13px;
@@ -101,10 +114,64 @@
             cursor: pointer;
             user-select: none;
         }
-        #namesToggle { top: 50px; }
+        #namesToggle  { top: 50px; }
         #densityToggle { top: 72px; }
-        #namesToggle label, #densityToggle label {
+        #splineToggle  { top: 94px; }
+        #namesToggle label, #densityToggle label, #splineToggle label {
             cursor: pointer;
+        }
+
+        /* --- Mobile / small-screen layout --- */
+        @media (max-width: 700px) {
+            #ui {
+                left: 10px;
+                transform: none;
+                text-align: left;
+                align-items: flex-start;
+                max-width: calc(100vw - 90px);
+                gap: 3px;
+            }
+            #timeDisplay {
+                font-size: 13px;
+                letter-spacing: 0;
+            }
+            #speed-label {
+                font-size: 11px;
+            }
+            #slider-row {
+                font-size: 10px;
+                gap: 4px;
+            }
+            #speedSlider {
+                width: min(130px, 35vw);
+            }
+            #animateBtn {
+                font-size: 13px;
+                padding: 5px 12px;
+            }
+            #infoBtn {
+                font-size: 12px;
+                padding: 4px 8px;
+            }
+            #infoPanel {
+                top: 44px;
+                left: 10px;
+                right: 10px;
+                width: auto;
+            }
+            #namesToggle,
+            #densityToggle,
+            #splineToggle {
+                top: auto;
+                right: 10px;
+                font-size: 14px;
+                background: rgba(0, 0, 0, 0.6);
+                padding: 4px 7px;
+                border-radius: 3px;
+            }
+            #splineToggle  { bottom: 68px; }
+            #namesToggle   { bottom: 38px; }
+            #densityToggle { bottom: 8px;  }
         }
     </style>
 </head>
@@ -119,12 +186,18 @@
         </div>
         <button id="animateBtn">Animate</button>
     </div>
-    <button id="infoBtn">Citations / Info</button>
+    <div id="topRight">
+        <canvas id="moonIndicator"></canvas>
+        <button id="infoBtn">Citations / Info</button>
+    </div>
     <div id="namesToggle">
-        <label><input type="checkbox" id="showNamesChk" checked> gauge names</label>
+        <label><input type="checkbox" id="showNamesChk"> gauge names</label>
     </div>
     <div id="densityToggle">
         <label><input type="checkbox" id="reduceDensityChk"> reduce density</label>
+    </div>
+    <div id="splineToggle">
+        <label><input type="checkbox" id="showSplineChk" checked> spline</label>
     </div>
     <div id="infoPanel">
         <h2>Data &amp; Movement Info</h2>
@@ -143,12 +216,26 @@
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        let logW = window.innerWidth, logH = window.innerHeight;
 
-        let showNames = true;
+        function setupCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            logW = window.innerWidth;
+            logH = window.innerHeight;
+            canvas.width  = logW * dpr;
+            canvas.height = logH * dpr;
+            canvas.style.width  = logW + 'px';
+            canvas.style.height = logH + 'px';
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        setupCanvas();
+
+        let showNames = false;
         let reduceDensity = false;
+        let showSpline = true;
         let thinnedData = [];
+        let hoveredStation = null;
+        let focusedStation = null;
 
         let data = [];
         let moonData = [];
@@ -196,11 +283,11 @@
             });
 
             const vRange = maxV - minV;
-            scaleY = (canvas.height * 0.8) / vRange;
-            offsetY = canvas.height * 0.1;
+            scaleY = (logH * 0.8) / vRange;
+            offsetY = logH * 0.1;
 
             data.forEach(station => {
-                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
                 station.scaleY = scaleY;
                 station.offsetY = offsetY;
                 station.minV = minV;
@@ -275,6 +362,61 @@
             draw();
         });
 
+        document.getElementById('showSplineChk').addEventListener('change', e => {
+            showSpline = e.target.checked;
+            draw();
+        });
+
+        function getStationAtPoint(mx, my) {
+            if (data.length === 0) return null;
+            const HIT = 10;
+            const t = minTime + currentTimeOffset;
+            let closest = null, bestDist = HIT;
+            (reduceDensity ? thinnedData : data).forEach(st => {
+                const v = interpolateV(st.predictions, t);
+                const sy = logH - st.offsetY - ((v - st.minV) * st.scaleY);
+                const d = Math.hypot(mx - st.x, my - sy);
+                if (d < bestDist) { bestDist = d; closest = st; }
+            });
+            return closest;
+        }
+
+        canvas.addEventListener('mousemove', e => {
+            const rect = canvas.getBoundingClientRect();
+            const found = getStationAtPoint(e.clientX - rect.left, e.clientY - rect.top);
+            if (found !== hoveredStation) {
+                hoveredStation = found;
+                canvas.style.cursor = found ? 'pointer' : 'default';
+                if (!isAnimating) draw();
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            if (hoveredStation) {
+                hoveredStation = null;
+                canvas.style.cursor = 'default';
+                if (!isAnimating) draw();
+            }
+        });
+
+        canvas.addEventListener('click', e => {
+            const rect = canvas.getBoundingClientRect();
+            const found = getStationAtPoint(e.clientX - rect.left, e.clientY - rect.top);
+            focusedStation = (found && found !== focusedStation) ? found : null;
+            if (!isAnimating) draw();
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            const found = getStationAtPoint(touch.clientX - rect.left, touch.clientY - rect.top);
+            if (found) {
+                focusedStation = found !== focusedStation ? found : null;
+                e.preventDefault();
+                if (!isAnimating) draw();
+            }
+        }, { passive: false });
+
         document.getElementById('infoBtn').addEventListener('click', () => {
             const panel = document.getElementById('infoPanel');
             panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -325,42 +467,205 @@
             return moonData[0];
         }
 
-        function drawMoonPhase(cx, cy, r, phase, waxing) {
+        function drawStationHighlight(station, currentTime, style) {
+            const v = interpolateV(station.predictions, currentTime);
+            const sy = logH - station.offsetY - ((v - station.minV) * station.scaleY);
+            const isFocus = style === 'focus';
+            const dotR  = isFocus ? 5 : 4;
+            const ringR = dotR + 4;
+
             ctx.save();
 
-            // Clip all drawing to the moon disk
+            // Glowing dot
+            ctx.shadowBlur  = isFocus ? 14 : 8;
+            ctx.shadowColor = isFocus ? 'rgba(255,215,0,0.85)' : 'rgba(255,255,255,0.6)';
+            ctx.fillStyle   = isFocus ? '#FFD700' : '#ffffff';
             ctx.beginPath();
-            ctx.arc(cx, cy, r, 0, 2 * Math.PI);
-            ctx.clip();
+            ctx.arc(station.x, sy, dotR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Ring
+            ctx.strokeStyle = isFocus ? '#FFD700' : 'rgba(255,255,255,0.75)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(station.x, sy, ringR, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Horizontal tooltip above the ring
+            const label = isFocus
+                ? station.name + '   ' + v.toFixed(2) + ' ft'
+                : station.name;
+            ctx.font = (isFocus ? 'bold ' : '') + '12px "Courier New"';
+            ctx.textBaseline = 'bottom';
+            ctx.textAlign = 'center';
+            const tw = ctx.measureText(label).width;
+            let lx = station.x;
+            lx = Math.max(lx, tw / 2 + 5);
+            lx = Math.min(lx, logW - tw / 2 - 5);
+            const ly = sy - ringR - 5;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.72)';
+            ctx.fillRect(lx - tw / 2 - 4, ly - 13, tw + 8, 15);
+            ctx.fillStyle = isFocus ? '#FFD700' : '#ffffff';
+            ctx.fillText(label, lx, ly);
+
+            ctx.restore();
+        }
+
+        // Fritsch-Carlson monotone cubic interpolation.
+        // Tangent slopes are set to zero at local extrema so the curve's
+        // peaks and troughs coincide exactly with the data points.
+        function computeMonotoneSpline(pts) {
+            const n = pts.length - 1;
+            if (n < 1) return null;
+            const h = [], delta = [];
+            for (let i = 0; i < n; i++) {
+                h.push(pts[i+1].x - pts[i].x);
+                delta.push((pts[i+1].y - pts[i].y) / h[i]);
+            }
+            // Step 1: initial tangents (arithmetic mean of neighbours)
+            const m = new Array(n + 1);
+            m[0] = delta[0];
+            m[n] = delta[n - 1];
+            for (let i = 1; i < n; i++) {
+                m[i] = delta[i-1] * delta[i] <= 0 ? 0 : (delta[i-1] + delta[i]) / 2;
+            }
+            // Step 2: Fritsch-Carlson monotonicity constraint
+            for (let i = 0; i < n; i++) {
+                if (Math.abs(delta[i]) < 1e-10) { m[i] = m[i+1] = 0; continue; }
+                const alpha = m[i]   / delta[i];
+                const beta  = m[i+1] / delta[i];
+                const sq = alpha*alpha + beta*beta;
+                if (sq > 9) {
+                    const tau = 3 / Math.sqrt(sq);
+                    m[i]   = tau * alpha * delta[i];
+                    m[i+1] = tau * beta  * delta[i];
+                }
+            }
+            return { pts, h, m };
+        }
+
+        function drawSpline(currentTime) {
+            const src = reduceDensity ? thinnedData : data;
+            const pts = src.map(st => {
+                const v = interpolateV(st.predictions, currentTime);
+                return { x: st.x, y: logH - st.offsetY - ((v - st.minV) * st.scaleY) };
+            }).sort((a, b) => a.x - b.x);
+            if (pts.length < 2) return;
+            const sp = computeMonotoneSpline(pts);
+            if (!sp) return;
+            const { m, h } = sp;
+            ctx.save();
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(255, 180, 60, 0.8)';
+            ctx.lineWidth = 1.5;
+            let seg = 0;
+            const x0 = Math.ceil(pts[0].x), x1 = Math.floor(pts[pts.length-1].x);
+            for (let px = x0; px <= x1; px++) {
+                while (seg < pts.length - 2 && px >= pts[seg+1].x) seg++;
+                const t  = (px - pts[seg].x) / h[seg];
+                const t2 = t * t, t3 = t2 * t;
+                const y  = pts[seg].y   * (2*t3 - 3*t2 + 1)
+                         + h[seg]*m[seg]   * (t3 - 2*t2 + t)
+                         + pts[seg+1].y * (-2*t3 + 3*t2)
+                         + h[seg]*m[seg+1] * (t3 - t2);
+                if (px === x0) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+            }
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // Vertical sky gradient colors (top, bottom) keyed by solar angle at map center.
+        // a = 0 (local noon) → 90 (terminator/horizon) → 180 (local midnight)
+        function skyGradientColors(a) {
+            const stops = [
+                { a:   0, top: [10,  90, 190],  bot: [100, 190, 240] },
+                { a:  78, top: [20, 100, 200],  bot: [120, 205, 250] },
+                { a:  86, top: [55,  72, 125],  bot: [130, 125, 150] },
+                { a:  93, top: [38,  28,  78],  bot: [ 80,  52,  90] },
+                { a: 101, top: [14,   8,  36],  bot: [ 28,  14,  46] },
+                { a: 108, top: [  2,  3,  15],  bot: [  4,   7,  22] },
+            ];
+            const clamp = Math.max(0, Math.min(180, a));
+            if (clamp <= stops[0].a)                     return [stops[0].top, stops[0].bot];
+            if (clamp >= stops[stops.length - 1].a)      return [stops[stops.length-1].top, stops[stops.length-1].bot];
+            for (let i = 0; i < stops.length - 1; i++) {
+                if (clamp >= stops[i].a && clamp <= stops[i+1].a) {
+                    const t = (clamp - stops[i].a) / (stops[i+1].a - stops[i].a);
+                    const lerp = (c0, c1) => c0.map((v, k) => Math.round(v + t * (c1[k] - v)));
+                    return [lerp(stops[i].top, stops[i+1].top), lerp(stops[i].bot, stops[i+1].bot)];
+                }
+            }
+            return [stops[stops.length-1].top, stops[stops.length-1].bot];
+        }
+
+        function drawBackground(bodies) {
+            const sunLon = bodies ? bodies.sunLon : null;
+            let angle = 180;
+            if (sunLon != null) {
+                const centerLon = (minLon360 + maxLon360) / 2;
+                let diff = ((centerLon - sunLon) % 360 + 360) % 360;
+                if (diff > 180) diff = 360 - diff;
+                angle = diff;
+            }
+            const [topRGB, botRGB] = skyGradientColors(angle);
+            const grad = ctx.createLinearGradient(0, 0, 0, logH);
+            grad.addColorStop(0, `rgb(${topRGB[0]},${topRGB[1]},${topRGB[2]})`);
+            grad.addColorStop(1, `rgb(${botRGB[0]},${botRGB[1]},${botRGB[2]})`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, logW, logH);
+        }
+
+        function drawMoonPhase(cx, cy, r, phase, waxing, c) {
+            c = c || ctx;
+            c.save();
+
+            // Clip all drawing to the moon disk
+            c.beginPath();
+            c.arc(cx, cy, r, 0, 2 * Math.PI);
+            c.clip();
 
             // Step 1: full white disk
-            ctx.fillStyle = 'white';
-            ctx.fillRect(cx - r, cy - r, 2 * r, 2 * r);
+            c.fillStyle = 'white';
+            c.fillRect(cx - r, cy - r, 2 * r, 2 * r);
 
             // Step 2: fill the unlit half with black
             // waxing → left half is dark; waning → right half is dark
-            ctx.fillStyle = 'black';
+            c.fillStyle = 'black';
             if (waxing) {
-                ctx.fillRect(cx - r, cy - r, r, 2 * r);
+                c.fillRect(cx - r, cy - r, r, 2 * r);
             } else {
-                ctx.fillRect(cx,     cy - r, r, 2 * r);
+                c.fillRect(cx,     cy - r, r, 2 * r);
             }
 
             // Step 3: terminator ellipse
             // x semi-axis goes from r (new) → 0 (quarter) → r (full)
             const ex = Math.abs(1 - 2 * phase) * r;
-            if (phase < 0.5) {
-                // Crescent: dark ellipse eats into the lit half
-                ctx.fillStyle = 'black';
-            } else {
-                // Gibbous: white ellipse carves lit area back out of the dark half
-                ctx.fillStyle = 'white';
-            }
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, ex, r, 0, 0, 2 * Math.PI);
-            ctx.fill();
+            c.fillStyle = phase < 0.5 ? 'black' : 'white';
+            c.beginPath();
+            c.ellipse(cx, cy, ex, r, 0, 0, 2 * Math.PI);
+            c.fill();
 
-            ctx.restore();
+            c.restore();
+        }
+
+        const moonIndicatorCanvas = document.getElementById('moonIndicator');
+        const moonCtx = moonIndicatorCanvas.getContext('2d');
+        (function setupMoonIndicator() {
+            const dpr = window.devicePixelRatio || 1;
+            const size = 30;
+            moonIndicatorCanvas.width  = size * dpr;
+            moonIndicatorCanvas.height = size * dpr;
+            moonCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        })();
+
+        function drawMoonIndicator(currentTime) {
+            const size = 30;
+            moonCtx.clearRect(0, 0, size, size);
+            if (moonData.length === 0) return;
+            const bodies = interpolateMoon(currentTime);
+            drawMoonPhase(size / 2, size / 2, size / 2 - 2, bodies.phase, bodies.waxing, moonCtx);
         }
 
         function drawEquilibriumTide(currentTime, bodies) {
@@ -368,8 +673,8 @@
             const sunLon  = (bodies && bodies.sunLon != null) ? bodies.sunLon
                           : ((180 - (currentTime % 86400000) / 3600000 * 15) % 360 + 360) % 360;
 
-            const centerY = canvas.height * 0.5;
-            const A_moon = canvas.height * 0.1;
+            const centerY = logH * 0.5;
+            const A_moon = logH * 0.1;
             const A_sun = 0.46 * A_moon;
 
             ctx.save();
@@ -377,8 +682,8 @@
             ctx.strokeStyle = 'rgba(120, 255, 180, 0.65)';
             ctx.lineWidth = 2;
 
-            for (let px = 0; px < canvas.width; px++) {
-                const lon = minLon360 + (px - 10) * (maxLon360 - minLon360) / (canvas.width - 20);
+            for (let px = 0; px < logW; px++) {
+                const lon = minLon360 + (px - 10) * (maxLon360 - minLon360) / (logW - 20);
                 const h = A_moon * Math.cos(2 * (lon - moonLon) * Math.PI / 180)
                         + A_sun  * Math.cos(2 * (lon - sunLon)  * Math.PI / 180);
                 const y = centerY - h;
@@ -391,13 +696,13 @@
             ctx.font = '11px "Courier New"';
             const labelX = 10;
             const lon0 = minLon360;
-            const lon1 = minLon360 + (maxLon360 - minLon360) * 4 / Math.max(canvas.width - 20, 1);
+            const lon1 = minLon360 + (maxLon360 - minLon360) * 4 / Math.max(logW - 20, 1);
             const y0 = centerY - (A_moon * Math.cos(2 * (lon0 - moonLon) * Math.PI / 180)
                         + A_sun  * Math.cos(2 * (lon0 - sunLon)  * Math.PI / 180));
             const y1 = centerY - (A_moon * Math.cos(2 * (lon1 - moonLon) * Math.PI / 180)
                         + A_sun  * Math.cos(2 * (lon1 - sunLon)  * Math.PI / 180));
             const dy = y1 - y0;
-            const dx = Math.max(1, (lon1 - lon0) / (maxLon360 - minLon360) * (canvas.width - 20));
+            const dx = Math.max(1, (lon1 - lon0) / (maxLon360 - minLon360) * (logW - 20));
             const angle = Math.atan2(dy, dx);
             ctx.save();
             ctx.translate(labelX, y0 - 4);
@@ -409,14 +714,18 @@
         }
 
         function draw() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const currentTime = minTime + currentTimeOffset;
+            const bodies = moonData.length > 0 ? interpolateMoon(currentTime) : null;
+
+            ctx.clearRect(0, 0, logW, logH);
+            drawBackground(bodies);
 
             // Horizontal tide-height grid (1 ft intervals, MLLW datum)
             const firstTick = Math.ceil(minV);
             ctx.textAlign = 'left';
             ctx.font = '11px "Courier New"';
             for (let v = firstTick; v <= maxV; v++) {
-                const y = canvas.height - offsetY - (v - minV) * scaleY;
+                const y = logH - offsetY - (v - minV) * scaleY;
                 if (v === 0) {
                     ctx.strokeStyle = 'rgba(100, 200, 255, 0.85)';
                     ctx.lineWidth = 1.5;
@@ -430,7 +739,7 @@
                 }
                 ctx.beginPath();
                 ctx.moveTo(0, y);
-                ctx.lineTo(canvas.width, y);
+                ctx.lineTo(logW, y);
                 ctx.stroke();
             }
 
@@ -443,24 +752,24 @@
             ctx.font = '12px "Courier New"';
             ctx.textAlign = 'center';
             for (let lon = firstGrid; lon <= maxLon360; lon += gridInterval) {
-                const x = ((lon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                const x = ((lon - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
                 ctx.beginPath();
                 ctx.moveTo(x, 0);
-                ctx.lineTo(x, canvas.height);
+                ctx.lineTo(x, logH);
                 ctx.stroke();
                 const label = (lon > 180 ? lon - 360 : lon).toFixed(0) + '°';
-                ctx.fillText(label, x, canvas.height - 8);
+                ctx.fillText(label, x, logH - 8);
             }
 
-            const currentTime = minTime + currentTimeOffset;
-            const bodies = moonData.length > 0 ? interpolateMoon(currentTime) : null;
             drawEquilibriumTide(currentTime, bodies);
+            if (showSpline) drawSpline(currentTime);
+            drawMoonIndicator(currentTime);
 
             ctx.font = '11px "Courier New"';
             ctx.textAlign = 'left';
             (reduceDensity ? thinnedData : data).forEach(station => {
                 const v = interpolateV(station.predictions, currentTime);
-                const y = canvas.height - station.offsetY - ((v - station.minV) * station.scaleY);
+                const y = logH - station.offsetY - ((v - station.minV) * station.scaleY);
 
                 ctx.fillStyle = 'white';
                 ctx.beginPath();
@@ -468,22 +777,22 @@
                 ctx.fill();
 
                 if (showNames) {
+                    ctx.save();
                     const textWidth = ctx.measureText(station.name).width;
-                    let labelX = station.x + 6;
-                    if (labelX + textWidth > canvas.width - 4) {
-                        labelX = canvas.width - 4 - textWidth;
-                    }
-                    ctx.textBaseline = 'bottom';
+                    ctx.translate(station.x, y + 4 + textWidth);
+                    ctx.rotate(-Math.PI / 2);
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'middle';
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
-                    ctx.fillText(station.name, labelX, y - 4);
-                    ctx.textBaseline = 'alphabetic';
+                    ctx.fillText(station.name, 0, 0);
+                    ctx.restore();
                 }
             });
             // Draw sun using Skyfield-derived sub-solar longitude
             const sunLon = bodies ? bodies.sunLon : ((180 - (currentTime % 86400000) / 3600000 * 15) % 360 + 360) % 360;
             if (sunLon >= minLon360 && sunLon <= maxLon360) {
-                const sunX = ((sunLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
-                const sunY = canvas.height / 4;
+                const sunX = ((sunLon - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
+                const sunY = logH / 4;
                 const sr = 15;
                 ctx.fillStyle = '#FFD700';
                 ctx.beginPath();
@@ -499,8 +808,8 @@
             if (bodies) {
                 const moonLon = bodies.longitude;
                 if (moonLon >= minLon360 && moonLon <= maxLon360) {
-                    const moonX = ((moonLon - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
-                    const moonY = canvas.height / 3;
+                    const moonX = ((moonLon - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
+                    const moonY = logH / 3;
                     const r = 15;
                     drawMoonPhase(moonX, moonY, r, bodies.phase, bodies.waxing);
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
@@ -508,6 +817,12 @@
                     ctx.textAlign = 'center';
                     ctx.fillText('moon', moonX, moonY + r + 13);
                 }
+            }
+
+            // Hover / focus highlights — drawn last so they sit on top of everything
+            if (focusedStation) drawStationHighlight(focusedStation, currentTime, 'focus');
+            if (hoveredStation && hoveredStation !== focusedStation) {
+                drawStationHighlight(hoveredStation, currentTime, 'hover');
             }
         }
 
@@ -530,10 +845,16 @@
         }
 
         window.addEventListener('resize', () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            setupCanvas();
+            const vRange = maxV - minV;
+            if (vRange > 0) {
+                scaleY = (logH * 0.8) / vRange;
+                offsetY = logH * 0.1;
+            }
             data.forEach(station => {
-                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (canvas.width - 20) + 10;
+                station.x = ((station.lon360 - minLon360) / (maxLon360 - minLon360)) * (logW - 20) + 10;
+                station.scaleY = scaleY;
+                station.offsetY = offsetY;
             });
             draw();
         });
